@@ -1,12 +1,9 @@
 
-
-
-
 import React, { useState, useMemo } from 'react';
 import { useContabilidade } from '../hooks/useContabilidade';
 import { Card, Button, Input, Alert, AlertDescription, Spinner, Modal } from '../components/ui';
 import { CalculatorIcon, CheckCircleIcon, AlertCircleIcon, ArrowUturnLeftIcon, TrashIcon } from '../components/ui/Icons';
-import { getValoresDRE, formatCurrency, calcularSaldos } from '../services/contabilidadeService';
+import { getValoresDRE, formatCurrency } from '../services/contabilidadeService';
 import { LancamentoContabil, NaturezaConta, TipoConta } from '../types';
 
 const Fechamento: React.FC = () => {
@@ -31,16 +28,26 @@ const Fechamento: React.FC = () => {
         return empresaSelecionada.lancamentos.filter(l => !l.isDeleted && !l.isEncerramento);
     }, [empresaSelecionada]);
 
-    const saldos = useMemo(() => {
-        if (!empresaSelecionada) return new Map<string, number>();
-        // Saldos para apuração são calculados apenas com base nos lançamentos do período, antes do fechamento.
-        return calcularSaldos(empresaSelecionada.planoDeContas, lancamentosPeriodo);
+    const saldosBrutos = useMemo(() => {
+        if (!empresaSelecionada || !lancamentosPeriodo.length) return new Map<string, number>();
+        
+        const brutos = new Map<string, number>();
+        lancamentosPeriodo.forEach(lancamento => {
+            lancamento.partidas.forEach(partida => {
+                const saldoAtual = brutos.get(partida.contaId) || 0;
+                const valor = partida.tipo === 'D' ? partida.valor : -partida.valor;
+                brutos.set(partida.contaId, saldoAtual + valor);
+            });
+        });
+        return brutos;
     }, [empresaSelecionada, lancamentosPeriodo]);
+
 
     const dre = useMemo(() => {
         if (!empresaSelecionada) return null;
-        return getValoresDRE(empresaSelecionada.planoDeContas, saldos);
-    }, [empresaSelecionada, saldos]);
+        // DRE is now correctly calculated using raw D-C balances of the period
+        return getValoresDRE(empresaSelecionada.planoDeContas, saldosBrutos);
+    }, [empresaSelecionada, saldosBrutos]);
 
     const apuracaoJaRealizada = useMemo(() => {
         return empresaSelecionada?.lancamentos.some(l => l.isEncerramento && !l.isDeleted);
@@ -92,22 +99,23 @@ const Fechamento: React.FC = () => {
         };
 
         pnlContas.forEach(conta => {
-            const saldoConta = Math.abs(saldos.get(conta.id) || 0);
-            if (saldoConta < 0.01) return;
+            const saldoBruto = saldosBrutos.get(conta.id) || 0;
+            if (Math.abs(saldoBruto) < 0.01) return;
 
-            const isCreditNature = [NaturezaConta.RECEITA].includes(conta.natureza);
-            const effectiveIsCreditNature = conta.isRedutora ? !isCreditNature : isCreditNature;
-
-            if (effectiveIsCreditNature) {
-                lancamentoZeramento.partidas.push({ contaId: conta.id, tipo: 'D', valor: saldoConta });
+            // Se saldoBruto < 0, é uma conta de natureza credora (Receita) -> Debita para zerar
+            // Se saldoBruto > 0, é uma conta de natureza devedora (Custo/Despesa) -> Credita para zerar
+            if (saldoBruto < 0) {
+                lancamentoZeramento.partidas.push({ contaId: conta.id, tipo: 'D', valor: Math.abs(saldoBruto) });
             } else {
-                lancamentoZeramento.partidas.push({ contaId: conta.id, tipo: 'C', valor: saldoConta });
+                lancamentoZeramento.partidas.push({ contaId: conta.id, tipo: 'C', valor: saldoBruto });
             }
         });
         
         if (dre.lucroLiquido > 0) {
+            // Lucro (resultado credor) -> Debita a ARE para transferir para o PL
             lancamentoZeramento.partidas.push({ contaId: areAccount.id, tipo: 'C', valor: dre.lucroLiquido });
         } else {
+             // Prejuízo (resultado devedor) -> Credita a ARE para transferir para o PL
             lancamentoZeramento.partidas.push({ contaId: areAccount.id, tipo: 'D', valor: Math.abs(dre.lucroLiquido) });
         }
         
